@@ -1,13 +1,15 @@
 from ollama import chat, ChatResponse
 from tools.temperature import get_temperature
+from tools import arithmetic
 
 class Worker:
     def __init__(self, model):
         self.model = model
 
+        # List of available functions that the model can call
         self.available_functions = {
-            "add": self.add,
-            "multiply": self.multiply,
+            "add": arithmetic.add,
+            "multiply": arithmetic.multiply,
             "get_temperature": get_temperature,
         }
 
@@ -49,7 +51,7 @@ class Worker:
             response: ChatResponse = chat(
                 model=self.model,
                 messages=messages,
-                tools=[self.add, self.multiply, self.available_functions["get_temperature"]],
+                tools=self.available_functions.values(),
                 think=True,
             )
 
