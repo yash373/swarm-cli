@@ -30,9 +30,10 @@ class StartupWizard:
     ]
 
     PRESET_CTX = [
-        (32768, "32K — Standard (default)"),
-        (65536, "64K — Long documents"),
-        (131072, "128K — Very large context"),
+        (32768, "32K — Standard, ~4-6 GB VRAM (default)"),
+        (65536, "64K — Long documents, ~8 GB VRAM"),
+        (131072, "128K — Very large context, ~16 GB VRAM"),
+        (262144, "256K — Massive context, ~24+ GB VRAM (A100/4090)"),
     ]
 
     def __init__(self):
@@ -59,7 +60,7 @@ class StartupWizard:
     def _selector(self, title: str, options: List[tuple]) -> str:
         print(UI.section(title))
         for i, (value, desc) in enumerate(options, 1):
-            print(UI.menu_item(i, value, desc))
+            print(UI.menu_item(i, str(value), desc))
         print()
         choice = self._ask_int("Select option", 1, 1, len(options))
         selected = options[choice - 1][0]
@@ -143,7 +144,7 @@ class StartupWizard:
         workers = self._ask_int("Initial workers (1-8)", 3, 1, 8)
         max_workers = self._ask_int("Max workers (1-16)", max(workers, 8), 1, 16)
 
-        ctx = int(self._selector("Context Window", self.PRESET_CTX))
+        ctx = int(self._selector("Context Window (VRAM estimate)", self.PRESET_CTX))
 
         print(UI.section("Strategy Mode"))
         print(UI.menu_item(1, "Auto", "Manager intelligently picks strategies (recommended)"))
