@@ -1,460 +1,17 @@
 # interface.py
-import json
-import os
+import argparse
 import re
 import sys
 import textwrap
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
-from manager import Manager, WorkerResult
+from manager import Manager
+from ui import UI, Style
+from store import ProjectStore, CodeExtractor
+from wizard import StartupWizard
 
-
-# ------------------------------------------------------------------------- #
-# UI & Styling
-# ------------------------------------------------------------------------- #
-
-class Style:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    ITALIC = "\033[3m"
-    UNDERLINE = "\033[4m"
-    BLACK = "\033[30m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    BG_BLACK = "\033[40m"
-    BG_GREEN = "\033[42m"
-    BG_BLUE = "\033[44m"
-    BG_CYAN = "\033[46m"
-
-    @classmethod
-    def strip(cls, text: str) -> str:
-        return re.sub(r"\033\[[0-9;]*m", "", text)
-
-
-class UI:
-    WIDTH = 64
-
-    @staticmethod
-    def banner(title: str, subtitle: str = "") -> str:
-        lines = [
-            "",
-            f"{Style.BOLD}{Style.CYAN}╔{'═' * UI.WIDTH}╗{Style.RESET}",
-            f"{Style.BOLD}{Style.CYAN}║{Style.RESET}  {Style.BOLD}{title:<{UI.WIDTH - 2}}{Style.RESET}{Style.CYAN}  ║{Style.RESET}",
-        ]
-        if subtitle:
-            lines.append(
-                f"{Style.CYAN}║{Style.RESET}  {Style.DIM}{subtitle:<{UI.WIDTH - 2}}{Style.RESET}{Style.CYAN}  ║{Style.RESET}"
-            )
-        lines.append(f"{Style.BOLD}{Style.CYAN}╚{'═' * UI.WIDTH}╝{Style.RESET}")
-        return "\n".join(lines)
-
-    @staticmethod
-    def status(label: str, message: str, color: str = Style.CYAN) -> str:
-        return f"  {Style.DIM}[{Style.RESET}{color}{label:>10}{Style.RESET}{Style.DIM}]{Style.RESET}  {message}"
-
-    @staticmethod
-    def section(title: str) -> str:
-        return f"\n{Style.BOLD}{Style.BLUE}▸ {title}{Style.RESET}\n"
-
-    @staticmethod
-    def artifact_saved(path: Path) -> str:
-        rel = path.relative_to(Path.home()) if path.is_relative_to(Path.home()) else path
-        return f"  {Style.GREEN}✓{Style.RESET}  Saved {Style.UNDERLINE}{rel}{Style.RESET}"
-
-    @staticmethod
-    def divider() -> str:
-        return f"{Style.DIM}{'─' * (UI.WIDTH + 2)}{Style.RESET}"
-
-    @staticmethod
-    def menu_item(index: int, label: str, desc: str = "", disabled: bool = False) -> str:
-        if disabled:
-            return f"  {Style.DIM}[{index}] {label:<20} {desc}{Style.RESET}"
-        return f"  {Style.BOLD}{Style.CYAN}[{index}]{Style.RESET} {Style.BOLD}{label:<20}{Style.RESET} {Style.DIM}{desc}{Style.RESET}"
-
-    @staticmethod
-    def prompt(text: str) -> str:
-        return f"\n{Style.BOLD}{Style.CYAN}?{Style.RESET}  {Style.BOLD}{text}{Style.RESET}  "
-
-    @staticmethod
-    def info(text: str) -> str:
-        return f"  {Style.DIM}ℹ {text}{Style.RESET}"
-
-
-# ------------------------------------------------------------------------- #
-# Project Store
-# ------------------------------------------------------------------------- #
-
-class ProjectStore:
-    def __init__(self, project_name: Optional[str] = None, base_dir: Optional[Path] = None):
-        self.base_dir = base_dir or self._default_projects_dir()
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-        self.project_name = project_name or f"Session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        safe_name = re.sub(r'[<>"/\\|?*]', "_", self.project_name).strip() or "Untitled"
-        self.project_dir = self.base_dir / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{safe_name}"
-        self.project_dir.mkdir(parents=True, exist_ok=True)
-
-        self.src_dir = self.project_dir / "src"
-        self.data_dir = self.project_dir / "data"
-        self.docs_dir = self.project_dir / "docs"
-        self.logs_dir = self.project_dir / "logs"
-        for d in (self.src_dir, self.data_dir, self.docs_dir, self.logs_dir):
-            d.mkdir(exist_ok=True)
-
-        self.readme_path = self.project_dir / "README.md"
-        self.history_path = self.logs_dir / "history.json"
-        self.chat_path = self.docs_dir / "chat.md"
-        self.state_path = self.logs_dir / "interface_state.json"
-
-        self._init_readme()
-        self._init_chat()
-
-    @staticmethod
-    def _default_projects_dir() -> Path:
-        home = Path.home()
-        desktop = home / "Desktop"
-        if sys.platform == "linux" and not desktop.exists():
-            desktop = home
-        return desktop / "SwarmProjects"
-
-    def _init_readme(self):
-        readme = textwrap.dedent(f"""\
-        # {self.project_name}
-
-        **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
-        **Location:** `{self.project_dir}`
-
-        ## Structure
-        - `src/` — Generated source code
-        - `data/` — JSON/CSV/data outputs
-        - `docs/` — Documentation & transcripts
-        - `logs/` — Session logs & state snapshots
-
-        ---
-        """)
-        self.readme_path.write_text(readme, encoding="utf-8")
-
-    def _init_chat(self):
-        header = textwrap.dedent(f"""\
-        # Chat Transcript — {self.project_name}
-
-        **Started:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-        ---
-        """)
-        self.chat_path.write_text(header, encoding="utf-8")
-
-    def save_turn(self, role: str, content: str, strategy: str = "", workers: int = 0):
-        history = []
-        if self.history_path.exists():
-            try:
-                history = json.loads(self.history_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        history.append({
-            "role": role,
-            "content": content,
-            "strategy": strategy,
-            "workers": workers,
-            "timestamp": datetime.now().isoformat(),
-        })
-        self.history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
-
-        md = f"\n## {role.upper()}\n\n"
-        if role == "assistant" and strategy:
-            md += f"*Strategy: `{strategy}` | Workers: {workers}*  \n"
-        md += f"{content}\n\n---\n"
-        with self.chat_path.open("a", encoding="utf-8") as f:
-            f.write(md)
-
-    def save_code(self, filename: str, content: str, language: str = "python") -> Path:
-        if not filename.endswith((".py", ".js", ".ts", ".json", ".md", ".csv", ".sh", ".sql", ".html", ".css")):
-            ext_map = {
-                "python": ".py", "javascript": ".js", "typescript": ".ts",
-                "json": ".json", "markdown": ".md", "csv": ".csv",
-                "bash": ".sh", "sql": ".sql", "html": ".html", "css": ".css",
-            }
-            filename += ext_map.get(language.lower(), ".txt")
-        path = self.src_dir / filename
-        path.write_text(content, encoding="utf-8")
-        return path
-
-    def save_data(self, filename: str, content: str) -> Path:
-        path = self.data_dir / filename
-        path.write_text(content, encoding="utf-8")
-        return path
-
-    def save_state(self, state: dict):
-        self.state_path.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
-
-    @classmethod
-    def list_projects(cls, base_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
-        base = base_dir or cls._default_projects_dir()
-        if not base.exists():
-            return []
-        projects = []
-        for folder in sorted(base.iterdir(), reverse=True):
-            if folder.is_dir():
-                readme = folder / "README.md"
-                name = folder.name
-                created = "Unknown"
-                if readme.exists():
-                    try:
-                        for line in readme.read_text(encoding="utf-8").splitlines():
-                            if line.startswith("**Created:**"):
-                                created = line.replace("**Created:**", "").strip()
-                                break
-                    except Exception:
-                        pass
-                src_count = len(list((folder / "src").glob("*"))) if (folder / "src").exists() else 0
-                projects.append({
-                    "folder": folder.name,
-                    "name": name,
-                    "created": created,
-                    "path": str(folder),
-                    "files": src_count,
-                })
-        return projects
-
-
-# ------------------------------------------------------------------------- #
-# Code Extractor
-# ------------------------------------------------------------------------- #
-
-class CodeExtractor:
-    LANG_MAP = {
-        "python": "py", "javascript": "js", "typescript": "ts",
-        "bash": "sh", "shell": "sh", "json": "json", "sql": "sql",
-        "html": "html", "css": "css", "markdown": "md", "csv": "csv",
-    }
-
-    @classmethod
-    def extract(cls, text: str) -> List[Dict[str, str]]:
-        blocks = []
-        pattern = r"```(\w+)?\n(.*?)```"
-        for match in re.finditer(pattern, text, re.DOTALL):
-            lang = (match.group(1) or "text").lower()
-            content = match.group(2).strip()
-            if len(content) < 20:
-                continue
-            filename = cls._guess_filename(content, lang)
-            blocks.append({"language": lang, "filename": filename, "content": content})
-        return blocks
-
-    @classmethod
-    def _guess_filename(cls, content: str, lang: str) -> str:
-        m = re.search(r'[#//]\s*filename:\s*([^\s]+)', content, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        if lang == "python":
-            m = re.search(r'^(?:class|def)\s+(\w+)', content, re.MULTILINE)
-            if m:
-                return f"{m.group(1)}.py"
-            return "script.py"
-        if lang in ("javascript", "typescript"):
-            m = re.search(r'(?:function|class|const|let)\s+(\w+)', content)
-            if m:
-                return f"{m.group(1)}.{'ts' if lang == 'typescript' else 'js'}"
-            return "script.js"
-        if lang == "json":
-            return "data.json"
-        if lang == "sql":
-            return "query.sql"
-        ext = cls.LANG_MAP.get(lang, "txt")
-        return f"generated.{ext}"
-
-
-# ------------------------------------------------------------------------- #
-# Startup Wizard
-# ------------------------------------------------------------------------- #
-
-class StartupWizard:
-    """Interactive startup menu with selectors instead of flags."""
-
-    PRESET_MANAGERS = [
-        ("gemma4:12b", "Gemma 4 — 12B (balanced, recommended)"),
-        ("gemma4:27b", "Gemma 4 — 27B (strongest, slower)"),
-        ("qwen3:8b", "Qwen 3 — 8B (fast, capable)"),
-        ("llama3.1:8b", "Llama 3.1 — 8B (general purpose)"),
-        ("mistral:7b", "Mistral — 7B (efficient)"),
-        ("custom", "Other (type manually)"),
-    ]
-
-    PRESET_WORKERS = [
-        ("qwen3:4b", "Qwen 3 — 4B (fast, efficient, recommended)"),
-        ("qwen3:8b", "Qwen 3 — 8B (stronger workers)"),
-        ("gemma4:4b", "Gemma 4 — 4B (if available)"),
-        ("phi4:4b", "Phi 4 — 4B (Microsoft)"),
-        ("custom", "Other (type manually)"),
-    ]
-
-    PRESET_CTX = [
-        (32768, "32K — Standard (default)"),
-        (65536, "64K — Long documents"),
-        (131072, "128K — Very large context"),
-    ]
-
-    def __init__(self):
-        self.base_dir = ProjectStore._default_projects_dir()
-        self.existing_projects = ProjectStore.list_projects(self.base_dir)
-
-    def _ask(self, text: str, default: str = "") -> str:
-        prompt = UI.prompt(text)
-        if default:
-            prompt += f"{Style.DIM}[{default}]{Style.RESET} "
-        return input(prompt).strip() or default
-
-    def _ask_int(self, text: str, default: int, min_val: int, max_val: int) -> int:
-        while True:
-            val = self._ask(text, str(default))
-            try:
-                n = int(val)
-                if min_val <= n <= max_val:
-                    return n
-                print(UI.info(f"Please enter a number between {min_val} and {max_val}."))
-            except ValueError:
-                print(UI.info("Please enter a valid number."))
-
-    def _selector(self, title: str, options: List[tuple]) -> str:
-        print(UI.section(title))
-        for i, (value, desc) in enumerate(options, 1):
-            print(UI.menu_item(i, value, desc))
-        print()
-        choice = self._ask_int("Select option", 1, 1, len(options))
-        selected = options[choice - 1][0]
-        if selected == "custom":
-            return self._ask("Enter custom value")
-        return selected
-
-    def run(self) -> Dict[str, Any]:
-        print(UI.banner("SWARM CLI", "Conversational Worker Orchestrator"))
-
-        # Main menu
-        print(UI.section("Welcome"))
-        print(UI.menu_item(1, "New Project", "Start a fresh session with configuration"))
-        has_projects = len(self.existing_projects) > 0
-        print(UI.menu_item(2, "Resume Project", "Continue a previous session" if has_projects else "No saved projects", disabled=not has_projects))
-        print(UI.menu_item(3, "Quick Start", "Default settings, skip configuration"))
-        print(UI.menu_item(4, "Power User", "Skip wizard, use command-line flags"))
-        print()
-
-        choice = self._ask_int("Select option", 1, 1, 4)
-
-        if choice == 4:
-            return {"skip_wizard": True}
-
-        if choice == 3:
-            return self._quick_start()
-
-        if choice == 2:
-            return self._resume_project()
-
-        return self._new_project()
-
-    def _quick_start(self) -> Dict[str, Any]:
-        print(UI.status("QUICK", "Using defaults: gemma4:12b → qwen3:4b × 3", Style.GREEN))
-        return {
-            "manager_model": "gemma4:12b",
-            "worker_model": "qwen3:4b",
-            "initial_workers": 3,
-            "max_workers": 8,
-            "num_ctx": 32768,
-            "auto_mode": True,
-            "project_name": None,
-            "projects_dir": None,
-        }
-
-    def _resume_project(self) -> Dict[str, Any]:
-        print(UI.section("Resume Project"))
-        print(UI.info(f"Found {len(self.existing_projects)} project(s)\n"))
-
-        for i, p in enumerate(self.existing_projects[:10], 1):
-            print(UI.menu_item(i, p["folder"][:40], f"Created: {p['created']} | Files: {p['files']}"))
-        print(UI.menu_item(0, "Back", "Return to main menu"))
-        print()
-
-        choice = self._ask_int("Select project", 1, 0, min(len(self.existing_projects), 10))
-        if choice == 0:
-            return self.run()
-
-        selected = self.existing_projects[choice - 1]
-        project_name = selected["folder"].split("_", 2)[-1] if "_" in selected["folder"] else selected["folder"]
-
-        print(UI.status("RESUME", f"Resuming '{project_name}'", Style.GREEN))
-        return {
-            "manager_model": "gemma4:12b",
-            "worker_model": "qwen3:4b",
-            "initial_workers": 3,
-            "max_workers": 8,
-            "num_ctx": 32768,
-            "auto_mode": True,
-            "project_name": project_name,
-            "projects_dir": self.base_dir,
-        }
-
-    def _new_project(self) -> Dict[str, Any]:
-        print(UI.section("New Project"))
-        project_name = self._ask("Project name", f"Swarm_{datetime.now().strftime('%H%M')}")
-
-        # Model selection
-        manager_model = self._selector("Select Manager Model (reasoning & synthesis)", self.PRESET_MANAGERS)
-        worker_model = self._selector("Select Worker Model (parallel execution)", self.PRESET_WORKERS)
-
-        # Worker count
-        print(UI.section("Worker Pool"))
-        workers = self._ask_int("Initial workers (1-8)", 3, 1, 8)
-        max_workers = self._ask_int("Max workers (1-16)", max(workers, 8), 1, 16)
-
-        # Context
-        ctx = int(self._selector("Context Window", self.PRESET_CTX))
-
-        # Mode
-        print(UI.section("Strategy Mode"))
-        print(UI.menu_item(1, "Auto", "Manager intelligently picks strategies (recommended)"))
-        print(UI.menu_item(2, "Manual", "You pick strategies with /strategy during chat"))
-        print()
-        mode_choice = self._ask_int("Select mode", 1, 1, 2)
-        auto_mode = mode_choice == 1
-
-        # Summary
-        print()
-        print(UI.banner("Configuration Summary"))
-        print(f"  {Style.BOLD}Project:{Style.RESET}     {project_name}")
-        print(f"  {Style.BOLD}Manager:{Style.RESET}     {manager_model}")
-        print(f"  {Style.BOLD}Workers:{Style.RESET}     {worker_model} × {workers} (max {max_workers})")
-        print(f"  {Style.BOLD}Context:{Style.RESET}     {ctx:,} tokens")
-        print(f"  {Style.BOLD}Mode:{Style.RESET}        {'Auto' if auto_mode else 'Manual'}")
-        print(f"  {Style.BOLD}Save to:{Style.RESET}     {self.base_dir}")
-        print()
-
-        confirm = self._ask("Press Enter to start, or type 'back' to reconfigure", "")
-        if confirm.lower() == "back":
-            return self._new_project()
-
-        return {
-            "manager_model": manager_model,
-            "worker_model": worker_model,
-            "initial_workers": workers,
-            "max_workers": max_workers,
-            "num_ctx": ctx,
-            "auto_mode": auto_mode,
-            "project_name": project_name,
-            "projects_dir": None,
-        }
-
-
-# ------------------------------------------------------------------------- #
-# Interface
-# ------------------------------------------------------------------------- #
 
 @dataclass
 class Turn:
@@ -478,7 +35,7 @@ class Interface:
         You are the strategy router for an AI worker swarm. Given the user's
         message, choose exactly ONE strategy from: single, parallel, ensemble,
         split, mapreduce, broadcast.
-
+        
         Rules:
         - "single": Simple Q&A, greetings, one-liners.
         - "parallel": Multiple distinct questions or independent items.
@@ -486,7 +43,7 @@ class Interface:
         - "split": Complex multi-step tasks (design, planning, writing).
         - "mapreduce": Large datasets/lists needing aggregation.
         - "broadcast": Context setting, persona, system instructions.
-
+        
         Respond with ONLY JSON: {"strategy":"...","reason":"...","workers":N,"subtasks":[]}
         User message: {query}
     """)
@@ -561,7 +118,7 @@ class Interface:
         self.current_workers = n
         return n
 
-    def _choose_strategy(self, query: str) -> tuple[str, int, List[str]]:
+    def _choose_strategy(self, query: str):
         if self._forced_strategy:
             return self._forced_strategy, self.current_workers, []
         if not self.auto_mode:
@@ -596,7 +153,7 @@ class Interface:
             self._resize_workers(max(1, min(workers, 2)))
         return strategy, self.current_workers, subtasks
 
-    def _heuristic_strategy(self, query: str) -> tuple[str, int, List[str]]:
+    def _heuristic_strategy(self, query: str):
         q = query.lower()
         if any(c in q for c in ["/workers", "set context", "persona:", "you are"]):
             return "broadcast", self.current_workers, []
@@ -900,13 +457,7 @@ class Interface:
             print(f"\n{response}")
 
 
-# ------------------------------------------------------------------------- #
-# Entry point — Wizard + Interface
-# ------------------------------------------------------------------------- #
-
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="Swarm CLI")
     parser.add_argument("--manager", default=None)
     parser.add_argument("--worker", default=None)
@@ -918,7 +469,6 @@ if __name__ == "__main__":
     parser.add_argument("--projects-dir", default=None)
     args = parser.parse_args()
 
-    # If any power-user flag is set, skip wizard
     power_flags_set = any([
         args.manager, args.worker, args.workers, args.max_workers, args.ctx,
         args.manual, args.project, args.projects_dir,
@@ -939,10 +489,8 @@ if __name__ == "__main__":
         wizard = StartupWizard()
         config = wizard.run()
         if config.get("skip_wizard"):
-            # User chose power user but didn't pass flags — show help and exit
             print(UI.banner("Power User Mode", "Use flags to configure directly"))
-            print("\nExample:")
-            print(f"  {Style.DIM}python interface.py --manager gemma4:12b --worker qwen3:4b --workers 4 --project MyApp{Style.RESET}\n")
+            print(f"\n  {Style.DIM}python interface.py --manager gemma4:12b --worker qwen3:4b --workers 4 --project MyApp{Style.RESET}\n")
             sys.exit(0)
 
     iface = Interface(**config)
