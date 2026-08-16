@@ -1,6 +1,8 @@
 import contextlib
 import io
 import signal
+import subprocess
+import sys
 import traceback
 
 from ollama import chat, ChatResponse
@@ -60,11 +62,86 @@ class Worker:
             result = output.getvalue()
             return result if result.strip() else "(no output - use print() to see results)"
 
-        # Only one tool - no more scanning a module for 71 functions.
-        self.available_functions = {"execute_python": execute_python}
+        def install_package(package_name: str) -> str:
+            """
+            Install a Python package with pip so it becomes importable
+            in subsequent execute_python calls. Use this whenever code
+            in execute_python fails with ModuleNotFoundError - install
+            the missing package, then retry the code.
+            Args:
+                package_name: The pip package name to install, e.g.
+                    "pymupdf" or "duckduckgo-search". Do not include a
+                    version pin unless one is specifically required.
+            Returns:
+                A success message with pip's output, or an error
+                message if the install failed or timed out.
+            """
+            try:
+                result = subprocess.run(
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--python",
+                        sys.executable,
+                        "--system",
+                        "--break-system-packages",
+                        package_name,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except FileNotFoundError:
+                return (
+                    "Error: 'uv' was not found on PATH. Install it "
+                    "(https://docs.astral.sh/uv/) or adjust install_package "
+                    "to use pip instead."
+                )
+            except subprocess.TimeoutExpired:
+                return f"Error: installing '{package_name}' timed out after 120s"
+            except Exception as e:
+                return f"Error installing '{package_name}': {e}"
+
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode != 0:
+                return f"Error installing '{package_name}':\n{output}"
+            return f"Successfully installed '{package_name}'.\n{output}".strip()
+
+        # Two tools: one to run code, one to install what that code needs.
+        self.available_functions = {
+            "execute_python": execute_python,
+            "install_package": install_package,
+        }
+
+    SYSTEM_PROMPT = (
+        "You have access to an execute_python tool that runs real Python code"
+        "with the full standard library. For any arithmetic beyond simple "
+        "single-digit operations - this includes multiplication, division, "
+        "roots, trig, statistics, or anything with decimals - you must use "
+        "execute_python to compute it. Do not calculate by hand in your "
+        "reasoning, even approximately. Hand calculation is unreliable and "
+        "not acceptable for this task. If a problem has multiple steps, use "
+        "the tool for each step, and store intermediate results in variables "
+        "you can reuse in later calls, since state persists across calls.\n\n"
+        "You also have an install_package tool. If execute_python fails with "
+        "ModuleNotFoundError (or ImportError) for a package that is not part "
+        "of the standard library, call install_package with that package's "
+        "pip name, then retry the exact same code in execute_python. Only "
+        "install a package after seeing this specific error - do not "
+        "preemptively install things you have not confirmed are missing."
+        "Some packages are already installed, so only install what is actually needed."
+        "Installed packages include: requests duckduckgo-search beautifulsoup4 pypdf pymupdf reportlab pandas numpy matplotlib sympy"
+        "Note: THE CURRENT YEAR IS 2026 but your memory is only updated up till 2023 but you can use the internet to get more recent information."
+        "In cicumstances when you cannot find information on a problem publically, attempt to find a pytohn package or an API that can help you get the information you need."
+    )
 
     def respond(self, query: str):
         messages = [
+            {
+                "role": "system",
+                "content": self.SYSTEM_PROMPT,
+            },
             {
                 "role": "user",
                 "content": query,

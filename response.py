@@ -1,16 +1,9 @@
 from worker import Worker
 
-worker1 = Worker("qwen3:4b")
+worker1 = Worker("qwen3:8b")
 worker1.respond(
     """
-    A cylindrical water tank has a radius equal to the smallest prime factor of 8,190, and a height equal to the number of ways to arrange 3 items chosen from a set of 7 distinct items (order matters).
-    Compute the tank's volume.
-    The tank is being filled by a pump whose flow rate (liters/hour) equals the positive root of the quadratic equation 2x² - 11x - 63 = 0.
-    Using that flow rate, calculate how many hours it takes to fill the tank (volume in liters — treat 1 unit³ = 1 liter).
-    A technician records 5 different fill-time trial runs due to pressure fluctuations: [trial_hours, trial_hours × 1.1, trial_hours × 0.85, trial_hours × 1.05, trial_hours × 0.95] where trial_hours is your answer from step 3. Compute the mean, median, and sample standard deviation of these 5 trials.
-    Finally, the tank must be insured. The insurance premium formula is: base premium of ₹5,000 compounded annually at a rate equal to arctangent(height/radius) / 100 (as a decimal rate), for a term of 3 years. Compute the final insured value.
+    Create a mathematical model that predicts who is going to win the 2026 F1 World Championship based on the performance of the drivers in the 2023, 2024, and 2025 seasons. Use the data from the last three seasons to make your predictions. You can use any publicly available data sources or APIs to gather information about the drivers' performance, such as their race results, qualifying positions, and points standings. You can also use any Python packages or libraries that you think will be helpful in creating your model. Please provide a detailed explanation of your methodology and the results of your predictions.
+    Create a report that includes your model, the data you used, and your predictions. The report should be in a format that can be easily shared with others, such as a PDF or a Jupyter notebook. Please include any visualizations or charts that help to illustrate your findings.
     """
 )
-
-
-# print(dir(arithmetic))
