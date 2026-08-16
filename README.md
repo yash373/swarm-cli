@@ -3,6 +3,8 @@
 
 A three-tier AI orchestration system that combines a powerful **Manager** model with a pool of lightweight **Worker** models to execute tasks in parallel, automatically selecting the optimal strategy for speed, accuracy, and efficiency.
 
+Every conversation is automatically persisted to a project folder on your Desktop (or a custom location), creating a complete, searchable archive of your AI sessions.
+
 ---
 
 ## Table of Contents
@@ -15,6 +17,7 @@ A three-tier AI orchestration system that combines a powerful **Manager** model 
   - [interface.py](#interfacepy)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Project Persistence](#project-persistence)
 - [Usage Examples](#usage-examples)
   - [Layer 1: Worker](#layer-1-worker)
   - [Layer 2: Manager](#layer-2-manager)
@@ -39,6 +42,7 @@ Swarm CLI is a conversational interface for local LLM orchestration via [Ollama]
 - **Map-Reduce** — large datasets processed in chunks
 - **Split-and-Conquer** — complex tasks auto-decomposed into parallel sub-tasks
 - **Tool-augmented workers** — each worker can execute Python, search the web, fetch URLs, and install packages
+- **Automatic project archiving** — every conversation is saved to disk in real time
 
 ---
 
@@ -56,7 +60,8 @@ Swarm CLI is a conversational interface for local LLM orchestration via [Ollama]
 │  ├─ History management                                      │
 │  ├─ Auto-strategy router                                    │
 │  ├─ Dynamic worker pool scaling                             │
-│  └─ Slash commands (/help, /workers, /strategy, etc.)       │
+│  ├─ Slash commands (/help, /workers, /strategy, etc.)       │
+│  └─ ProjectStore — real-time disk persistence               │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -130,7 +135,7 @@ The orchestration layer. `Manager` inherits from `Worker`, so it retains all too
 
 ### interface.py
 
-The user-facing conversational CLI. Wraps `Manager` with persistent history, auto-strategy routing, and runtime controls.
+The user-facing conversational CLI. Wraps `Manager` with persistent history, auto-strategy routing, runtime controls, and automatic project archiving via `ProjectStore`.
 
 **Key features:**
 - **Auto-strategy mode** — Manager classifies each user message and picks the best execution pattern
@@ -138,6 +143,9 @@ The user-facing conversational CLI. Wraps `Manager` with persistent history, aut
 - **Dynamic scaling** — resize worker pool mid-conversation via `/workers <n>`
 - **Conversation history** — full transcript with strategy and worker metadata
 - **Model hot-swapping** — change manager or worker models without restarting
+- **Real-time persistence** — every turn is immediately written to disk
+- **Project folders** — each session gets its own folder on your Desktop
+- **Artifact saving** — save generated files directly into the project folder
 
 ---
 
@@ -176,17 +184,67 @@ ollama pull qwen3:8b     # stronger workers
 ## Quick Start
 
 ```bash
-# Auto-strategy mode (recommended)
-python interface.py --manager gemma4:12b --worker qwen3:4b --workers 3
+# Auto-strategy mode with a named project
+python interface.py --manager gemma4:12b --worker qwen3:4b --workers 3 --project "PhysicsNotes"
 
-# Heavy-duty configuration
+# Heavy-duty configuration with custom save location
 python interface.py \\
     --manager gemma4:27b \\
     --worker qwen3:8b \\
     --workers 6 \\
     --max-workers 12 \\
-    --ctx 65536
+    --ctx 65536 \\
+    --project "CodeReview" \\
+    --projects-dir ~/Documents/AIChats
 ```
+
+---
+
+## Project Persistence
+
+Every conversation is automatically saved to a project folder. This happens **in real time** — after every single turn, the full state is written to disk.
+
+### Folder Structure
+
+```
+~/Desktop/SwarmProjects/                    # or your custom --projects-dir
+├── 2026-08-17_013045_PhysicsNotes/
+│   ├── manifest.json          # creation time, project name, platform info
+│   ├── history.json           # structured turn-by-turn data (machine-readable)
+│   ├── chat.md                # human-readable markdown transcript
+│   ├── strategies.json        # usage analytics per strategy
+│   ├── interface_state.json   # full runtime snapshot for potential resume
+│   └── artifacts/             # files saved via /artifact command
+│       └── quicksort.py
+│       └── notes.txt
+├── 2026-08-17_015030_Default/
+│   ├── manifest.json
+│   ├── history.json
+│   ├── chat.md
+│   └── ...
+└── ...
+```
+
+### File Descriptions
+
+| File | Purpose |
+|------|---------|
+| `manifest.json` | Session metadata: creation time, project name, OS platform, working directory |
+| `history.json` | Structured array of every turn with role, content, strategy, worker count, and timestamp |
+| `chat.md` | Clean Markdown transcript you can open in VS Code, Obsidian, or any text editor — updates live |
+| `strategies.json` | Analytics object tracking how often each strategy was used |
+| `interface_state.json` | Snapshot of runtime config (models, worker count, strategy mode) |
+| `artifacts/` | Folder for files you explicitly save with the `/artifact` command |
+
+### Cross-Platform Desktop Detection
+
+The `ProjectStore` automatically finds your Desktop folder:
+
+- **Windows**: `C:\\Users\\<You>\\Desktop\\SwarmProjects`
+- **macOS**: `~/Desktop/SwarmProjects`
+- **Linux**: `~/Desktop/SwarmProjects` (falls back to `~` if Desktop doesn't exist)
+
+Override with `--projects-dir <path>`.
 
 ---
 
@@ -261,16 +319,20 @@ with Manager(
 
 ### Layer 3: Interface
 
-The full conversational experience:
+The full conversational experience with automatic project archiving:
 
 ```bash
-$ python interface.py --manager gemma4:12b --worker qwen3:4b --workers 3
+$ python interface.py --manager gemma4:12b --worker qwen3:4b --workers 3 --project "ResearchSession"
+
+[Project] Saved to: /Users/you/Desktop/SwarmProjects/2026-08-17_013045_ResearchSession
+[System] Spawning Manager (gemma4:12b) with 3 workers (qwen3:4b)...
 
 ╔══════════════════════════════════════════════════════════════╗
 ║  SWARM CLI  —  Conversational Worker Orchestrator            ║
 ║  Manager: gemma4:12b                                         ║
 ║  Workers: qwen3:4b          x 3                              ║
 ║  Mode:    AUTO (manager decides strategy)                    ║
+║  Project: /Users/you/Desktop/SwarmProjects/...               ║
 ╚══════════════════════════════════════════════════════════════╝
 Type /help for commands. Start chatting below.
 
@@ -296,6 +358,10 @@ GET /tasks ...
 POST /tasks ...
 ...
 
+> /artifact api_spec.md "## REST API Spec\\n\\n### GET /tasks..."
+Artifact saved:
+  /Users/you/Desktop/SwarmProjects/.../artifacts/api_spec.md
+
 > /workers 6
 [System] Spawning 3 new worker(s)...
 Worker pool resized to 6.
@@ -306,8 +372,24 @@ Strategy forced to: ENSEMBLE
 > /strategy auto
 Strategy set to AUTO (manager decides).
 
+> /project
+Current project folder:
+  /Users/you/Desktop/SwarmProjects/2026-08-17_013045_ResearchSession
+
+> /projects
+Saved Projects:
+----------------------------------------
+  • 2026-08-17_013045_ResearchSession
+    Name: ResearchSession
+    Created: 2026-08-17T01:30:45
+    Path: /Users/you/Desktop/SwarmProjects/...
+  • 2026-08-16_223012_Default
+    Name: Default
+    Created: 2026-08-16T22:30:12
+    Path: /Users/you/Desktop/SwarmProjects/...
+
 > /quit
-[System] Shutting down...
+[System] Saving final state...
 ```
 
 ---
@@ -347,14 +429,18 @@ Type any command at the `>` prompt:
 
 | Command | Description |
 |---------|-------------|
-| `/quit`, `/q` | Exit the interface |
-| `/clear` | Clear conversation history |
-| `/history` | Show full transcript with strategy metadata |
-| `/status` | Show current configuration (models, workers, strategy) |
+| `/quit`, `/q` | Exit the interface (saves final state before exiting) |
+| `/clear` | Clear in-memory history (disk files remain) |
+| `/history` | Show conversation transcript |
+| `/status` | Show current configuration |
 | `/workers <n>` | Resize worker pool (respects min/max bounds) |
 | `/strategy <s>` | Force strategy: `single`, `parallel`, `ensemble`, `split`, `mapreduce`, `broadcast`, or `auto` |
 | `/model <name>` | Change manager model (re-initializes manager) |
 | `/worker_model <name>` | Change model for all workers instantly |
+| `/project` | Show the full path to the current session folder |
+| `/projects` | List all saved conversation projects with metadata |
+| `/save` | Force an immediate state snapshot to disk |
+| `/artifact <filename> <content>` | Save a text file into the project's `artifacts/` folder |
 | `/help`, `/h` | Show command reference |
 
 ---
@@ -373,6 +459,8 @@ Options:
   --max-workers INTEGER Max worker pool size (default: 8)
   --ctx INTEGER         Context window size (default: 32768)
   --manual              Disable auto-strategy (manual mode)
+  --project TEXT        Project name for this session (default: auto-generated)
+  --projects-dir PATH   Custom directory for project folders (default: Desktop/SwarmProjects)
 ```
 
 ### Programmatic Configuration
@@ -388,6 +476,8 @@ iface = Interface(
     min_workers=1,
     num_ctx=65536,
     auto_mode=True,
+    project_name="MyResearch",
+    projects_dir=Path.home() / "Documents" / "AIChats",
 )
 
 # Single turn
@@ -408,7 +498,8 @@ iface.run()
 2. **JSON Decision**: The Manager returns a JSON object: `{"strategy": "...", "reason": "...", "workers": N, "subtasks": []}`
 3. **Worker Scaling**: The Interface resizes the worker pool if the recommended count differs from the current pool.
 4. **Execution**: The appropriate method (`parallel_respond`, `ensemble_respond`, etc.) is called.
-5. **History**: The turn is logged with strategy and worker metadata for transparency.
+5. **Persistence**: The turn is immediately saved to `history.json`, `chat.md`, and `strategies.json`.
+6. **History**: The turn is logged in memory with strategy and worker metadata for transparency.
 
 ### Why Threading?
 
@@ -424,6 +515,16 @@ For CPU-bound tasks inside `execute_python`, the tool itself runs in the calling
 ### Persistent Python State
 
 Each `Worker` maintains a `_python_globals` dict. Variables, imports, and functions defined in one `execute_python` call are available in the next call **within that same worker**. This makes it behave like a real REPL, not a fresh interpreter per call.
+
+### ProjectStore Persistence
+
+The `ProjectStore` class handles all disk I/O:
+
+- **Auto-folder creation**: On initialization, it creates a timestamped folder on your Desktop (or custom path)
+- **Real-time writes**: Every user and assistant turn triggers an immediate filesystem write — no batching, no delay
+- **Dual formats**: `history.json` for structured data, `chat.md` for human readability
+- **Artifact storage**: The `/artifact` command saves files into a dedicated `artifacts/` subfolder
+- **Project listing**: The `/projects` command scans the base directory and reads each project's `manifest.json`
 
 ---
 
@@ -448,7 +549,13 @@ Each `Worker` maintains a `_python_globals` dict. Variables, imports, and functi
    - Force `split` for creative writing, design, and research tasks.
    - Use `broadcast` to set a persona before a long session.
 
-5. **Tool Usage**
+5. **Project Organization**
+   - Always use `--project "Name"` so sessions are easy to find later.
+   - Use `--projects-dir ~/Documents/AIChats` if you prefer a non-Desktop location.
+   - Open `chat.md` in VS Code or Obsidian while you chat — it updates live.
+   - Use `/artifact` to save generated code, notes, or data extracts into the project folder.
+
+6. **Tool Usage**
    - Workers auto-install packages when needed — no manual intervention required.
    - Web search is automatically retried across multiple backends if one fails.
    - Always use `print()` in `execute_python` — return values are not auto-captured.
@@ -463,5 +570,5 @@ MIT — use, modify, and distribute freely.
 with open("/mnt/agents/output/README.md", "w", encoding="utf-8") as f:
     f.write(readme_content)
 
-print("README.md written successfully.")
+print(f"README.md updated successfully.")
 print(f"Total characters: {len(readme_content)}")
