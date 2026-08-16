@@ -1,14 +1,184 @@
 # interface.py
 import json
+import os
 import re
 import sys
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from manager import Manager, WorkerResult
 
+
+# ------------------------------------------------------------------------- #
+# Project Persistence Layer
+# ------------------------------------------------------------------------- #
+
+class ProjectStore:
+    """
+    Handles filesystem persistence for every conversation.
+    Structure:
+        ~/Desktop/SwarmProjects/
+        ├── 2026-08-17_013045_Untitled/
+        │   ├── manifest.json
+        │   ├── history.json
+        │   ├── chat.md
+        │   ├── strategies.json
+        │   └── artifacts/
+        └── ...
+    """
+
+    def __init__(self, project_name: Optional[str] = None, base_dir: Optional[Path] = None):
+        self.base_dir = base_dir or self._default_projects_dir()
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        self.project_name = project_name or f"Session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Sanitize folder name
+        safe_name = re.sub(r'[<>:"/\\|?*]', "_", self.project_name).strip() or "Untitled"
+        self.project_dir = self.base_dir / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{safe_name}"
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+
+        # Subdirs
+        self.artifacts_dir = self.project_dir / "artifacts"
+        self.artifacts_dir.mkdir(exist_ok=True)
+
+        self.manifest_path = self.project_dir / "manifest.json"
+        self.history_path = self.project_dir / "history.json"
+        self.chat_md_path = self.project_dir / "chat.md"
+        self.strategies_path = self.project_dir / "strategies.json"
+
+        # Initialize files
+        self._init_manifest()
+        self._init_chat_md()
+
+    @staticmethod
+    def _default_projects_dir() -> Path:
+        """Cross-platform Desktop detection."""
+        home = Path.home()
+        # Windows
+        if sys.platform == "win32":
+            desktop = home / "Desktop"
+        # macOS
+        elif sys.platform == "darwin":
+            desktop = home / "Desktop"
+        # Linux & others
+        else:
+            desktop = home / "Desktop"
+            if not desktop.exists():
+                desktop = home  # fallback
+        return desktop / "SwarmProjects"
+
+    def _init_manifest(self):
+        manifest = {
+            "created_at": datetime.now().isoformat(),
+            "project_name": self.project_name,
+            "platform": sys.platform,
+            "cwd": str(Path.cwd()),
+        }
+        self.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    def _init_chat_md(self):
+        header = textwrap.dedent(f"""\
+        # {self.project_name}
+
+        **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+        **Location:** `{self.project_dir}`
+
+        ---
+        """)
+        self.chat_md_path.write_text(header, encoding="utf-8")
+
+    def save_turn(self, turn: "Turn", strategy: str, workers_used: int):
+        """Append a single turn to all persistence files."""
+
+        # 1. history.json — structured, machine-readable
+        history = []
+        if self.history_path.exists():
+            try:
+                history = json.loads(self.history_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                history = []
+        history.append({
+            "role": turn.role,
+            "content": turn.content,
+            "strategy": strategy if turn.role == "assistant" else "",
+            "workers_used": workers_used if turn.role == "assistant" else 0,
+            "timestamp": turn.timestamp,
+        })
+        self.history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+        # 2. chat.md — human-readable transcript
+        md_line = f"\n## Turn {len(history)}\n\n"
+        md_line += f"**Role:** {turn.role}  \n"
+        if turn.role == "assistant":
+            md_line += f"**Strategy:** `{strategy}` | **Workers:** {workers_used}  \n"
+        md_line += f"**Time:** {turn.timestamp}\n\n"
+        md_line += f"{turn.content}\n\n---\n"
+        with self.chat_md_path.open("a", encoding="utf-8") as f:
+            f.write(md_line)
+
+        # 3. strategies.json — analytics
+        strategies = {}
+        if self.strategies_path.exists():
+            try:
+                strategies = json.loads(self.strategies_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                strategies = {}
+        strategies[strategy] = strategies.get(strategy, 0) + 1
+        self.strategies_path.write_text(json.dumps(strategies, indent=2), encoding="utf-8")
+
+    def save_artifact(self, filename: str, content: str) -> Path:
+        """Save a generated artifact (code, data, etc.) into the project."""
+        path = self.artifacts_dir / filename
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def save_state(self, interface_state: dict):
+        """Save full interface state for resume capability."""
+        state_path = self.project_dir / "interface_state.json"
+        state_path.write_text(json.dumps(interface_state, indent=2, default=str), encoding="utf-8")
+
+    @classmethod
+    def list_projects(cls, base_dir: Optional[Path] = None) -> List[dict]:
+        """List all saved projects with metadata."""
+        base = base_dir or cls._default_projects_dir()
+        if not base.exists():
+            return []
+        projects = []
+        for folder in sorted(base.iterdir()):
+            if folder.is_dir():
+                manifest_file = folder / "manifest.json"
+                manifest = {}
+                if manifest_file.exists():
+                    try:
+                        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                projects.append({
+                    "folder": folder.name,
+                    "path": str(folder),
+                    "name": manifest.get("project_name", folder.name),
+                    "created": manifest.get("created_at", "Unknown"),
+                })
+        return projects
+
+    @classmethod
+    def load_history(cls, project_path: Path) -> List[dict]:
+        """Load history.json from a project folder."""
+        hist_file = project_path / "history.json"
+        if hist_file.exists():
+            return json.loads(hist_file.read_text(encoding="utf-8"))
+        return []
+
+    def __repr__(self):
+        return f"ProjectStore({self.project_dir})"
+
+
+# ------------------------------------------------------------------------- #
+# Data models
+# ------------------------------------------------------------------------- #
 
 @dataclass
 class Turn:
@@ -19,21 +189,11 @@ class Turn:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
-class Interface:
-    """
-    Conversational CLI that wraps Manager.
-    
-    Features:
-      - Persistent multi-turn conversation history
-      - Auto-strategy selection (single / parallel / ensemble / split / mapreduce)
-      - Dynamic worker spawn/prune
-      - Rich slash commands for runtime control
-      - Streaming-like progress reporting
-    """
+# ------------------------------------------------------------------------- #
+# Interface
+# ------------------------------------------------------------------------- #
 
-    # --------------------------------------------------------------------- #
-    # Strategy definitions
-    # --------------------------------------------------------------------- #
+class Interface:
     STRATEGIES = {
         "single": "One worker, one shot. Fastest for simple Q&A.",
         "parallel": "Multiple independent queries answered simultaneously.",
@@ -72,6 +232,8 @@ class Interface:
         min_workers: int = 1,
         num_ctx: int = 32768,
         auto_mode: bool = True,
+        project_name: Optional[str] = None,
+        projects_dir: Optional[Path] = None,
     ):
         self.manager_model = manager_model
         self.worker_model = worker_model
@@ -83,15 +245,15 @@ class Interface:
         self.history: List[Turn] = []
         self.turn_count = 0
 
+        # Initialize persistence
+        self.store = ProjectStore(project_name=project_name, base_dir=projects_dir)
+        print(f"[Project] Saved to: {self.store.project_dir}")
+
         # Initialize Manager
         self._init_manager(initial_workers, num_ctx)
 
         # Welcome banner
         self._print_banner()
-
-    # --------------------------------------------------------------------- #
-    # Lifecycle
-    # --------------------------------------------------------------------- #
 
     def _init_manager(self, num_workers: int, num_ctx: int):
         print(f"[System] Spawning Manager ({self.manager_model}) with {num_workers} workers ({self.worker_model})...")
@@ -106,16 +268,15 @@ class Interface:
         self.current_workers = num_workers
 
     def _resize_workers(self, n: int) -> int:
-        """Spawn or prune workers to reach target count."""
         n = max(self.min_workers, min(n, self.max_workers))
         if n == self.current_workers:
             return n
 
         if n > self.current_workers:
-            # Spawn additional workers
             needed = n - self.current_workers
             print(f"[System] Spawning {needed} new worker(s)...")
             for _ in range(needed):
+                from worker import Worker
                 w = Worker(
                     model=self.worker_model,
                     default_timeout_seconds=self.mgr.default_timeout_seconds,
@@ -129,7 +290,6 @@ class Interface:
             from concurrent.futures import ThreadPoolExecutor
             self.mgr._executor = ThreadPoolExecutor(max_workers=n)
         else:
-            # Prune excess workers
             prune = self.current_workers - n
             print(f"[System] Pruning {prune} worker(s)...")
             self.mgr.workers = self.mgr.workers[:n]
@@ -142,26 +302,16 @@ class Interface:
         self.current_workers = n
         return n
 
-    # --------------------------------------------------------------------- #
-    # Strategy routing
-    # --------------------------------------------------------------------- #
-
     def _choose_strategy(self, query: str) -> tuple[str, int, List[str]]:
-        """
-        Returns (strategy, num_workers, subtasks).
-        If auto_mode is off, uses forced strategy.
-        """
         if self._forced_strategy:
             return self._forced_strategy, self.current_workers, []
 
         if not self.auto_mode:
             return "single", self.current_workers, []
 
-        # Use Manager's own brain to classify
         prompt = self.AUTO_PROMPT.format(query=query)
         raw = self.mgr.respond(prompt)
 
-        # Extract JSON
         try:
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
@@ -169,7 +319,6 @@ class Interface:
             else:
                 raise ValueError("No JSON found")
         except Exception:
-            # Fallback to heuristic
             return self._heuristic_strategy(query)
 
         strategy = decision.get("strategy", "single")
@@ -179,7 +328,6 @@ class Interface:
         if strategy not in self.STRATEGIES:
             strategy = "single"
 
-        # Resize if needed
         if strategy in ("ensemble", "split", "mapreduce", "parallel"):
             self._resize_workers(workers)
         else:
@@ -188,7 +336,6 @@ class Interface:
         return strategy, self.current_workers, subtasks
 
     def _heuristic_strategy(self, query: str) -> tuple[str, int, List[str]]:
-        """Fast fallback when JSON parsing fails."""
         q = query.lower()
         if any(c in q for c in ["/workers", "set context", "persona:", "you are"]):
             return "broadcast", self.current_workers, []
@@ -204,23 +351,17 @@ class Interface:
                 return "parallel", min(len(parts), self.max_workers), []
         return "single", 1, []
 
-    # --------------------------------------------------------------------- #
-    # Execution engines
-    # --------------------------------------------------------------------- #
-
     def _execute_single(self, query: str) -> str:
         return self.mgr.delegate(query)
 
     def _execute_parallel(self, query: str, subtasks: List[str]) -> str:
         if not subtasks:
-            # Try to split on newlines / bullets / "and"
             parts = [p.strip() for p in re.split(r'[;•]|\n', query) if len(p.strip()) > 10]
             if len(parts) < 2:
-                parts = [query]  # Fallback
+                parts = [query]
             subtasks = parts
 
         results = self.mgr.parallel_respond(subtasks)
-        # Synthesize through manager
         combined = "\n\n---\n\n".join(
             f"[Part {i+1}]\n{r.response}" for i, r in enumerate(results) if not r.error
         )
@@ -242,7 +383,6 @@ class Interface:
 
     def _execute_split(self, query: str, subtasks: List[str]) -> str:
         if subtasks:
-            # Override auto-subtasks with provided ones
             results = self.mgr.parallel_respond(subtasks)
             combined = "\n\n---\n\n".join(
                 f"[Sub-task {i+1}: {t}]\n{r.response if not r.error else f'Error: {r.error}'}"
@@ -256,11 +396,9 @@ class Interface:
         return self.mgr.split_and_conquer(query, n_subtasks=self.current_workers)
 
     def _execute_mapreduce(self, query: str) -> str:
-        # Extract list items from query heuristically
         lines = [l.strip() for l in query.splitlines() if l.strip()]
         items = []
         for line in lines:
-            # Match bullet points, numbers, or quoted blocks
             m = re.match(r'^\s*[-•*\d.)\]]+\s*(.+)', line)
             if m:
                 items.append(m.group(1))
@@ -268,7 +406,6 @@ class Interface:
                 items.append(line)
 
         if len(items) < 2:
-            # Not enough items — treat as single
             return self._execute_single(query)
 
         return self.mgr.map_reduce(
@@ -287,22 +424,41 @@ class Interface:
         return f"Context broadcast to {ok}/{len(results)} workers. Ready for next query."
 
     # --------------------------------------------------------------------- #
+    # Persistence helpers
+    # --------------------------------------------------------------------- #
+
+    def _persist_turn(self, turn: Turn, strategy: str, workers_used: int):
+        """Save turn to disk immediately."""
+        self.store.save_turn(turn, strategy, workers_used)
+        # Also save full interface state snapshot
+        self.store.save_state({
+            "manager_model": self.manager_model,
+            "worker_model": self.worker_model,
+            "current_workers": self.current_workers,
+            "auto_mode": self.auto_mode,
+            "forced_strategy": self._forced_strategy,
+            "turn_count": self.turn_count,
+        })
+
+    def _save_artifact(self, filename: str, content: str) -> str:
+        """Save a file artifact and return its path."""
+        path = self.store.save_artifact(filename, content)
+        return str(path)
+
+    # --------------------------------------------------------------------- #
     # Main loop
     # --------------------------------------------------------------------- #
 
     def chat(self, query: str) -> str:
-        """
-        Process one user turn. Auto-selects strategy, executes, stores history.
-        Returns the assistant's response string.
-        """
         self.turn_count += 1
 
-        # Slash commands
         if query.startswith("/"):
             return self._handle_command(query)
 
-        # Add user turn
-        self.history.append(Turn(role="user", content=query))
+        # Save user turn
+        user_turn = Turn(role="user", content=query)
+        self.history.append(user_turn)
+        self._persist_turn(user_turn, "", 0)
 
         # Strategy selection
         strategy, n_workers, subtasks = self._choose_strategy(query)
@@ -327,13 +483,15 @@ class Interface:
         except Exception as e:
             answer = f"Error during execution: {type(e).__name__}: {e}"
 
-        # Store assistant turn
-        self.history.append(Turn(
+        # Save assistant turn
+        assistant_turn = Turn(
             role="assistant",
             content=answer,
             strategy=strategy,
             workers_used=n_workers,
-        ))
+        )
+        self.history.append(assistant_turn)
+        self._persist_turn(assistant_turn, strategy, n_workers)
 
         return answer
 
@@ -349,7 +507,8 @@ class Interface:
         action = parts[0].lower()
 
         if action == "/quit" or action == "/q":
-            print("[System] Shutting down...")
+            print("[System] Saving final state...")
+            self._persist_turn(Turn(role="system", content="Session ended."), "system", 0)
             self.mgr.shutdown()
             sys.exit(0)
 
@@ -359,7 +518,7 @@ class Interface:
         elif action == "/clear":
             self.history.clear()
             self.turn_count = 0
-            return "Conversation history cleared."
+            return "Conversation history cleared. (Disk files remain.)"
 
         elif action == "/history":
             return self._format_history()
@@ -393,7 +552,6 @@ class Interface:
         elif action == "/model":
             if len(parts) > 1:
                 self.manager_model = parts[1]
-                # Re-init manager with new model
                 old_workers = self.current_workers
                 self.mgr.shutdown()
                 self._init_manager(old_workers, self.mgr.num_ctx)
@@ -414,8 +572,38 @@ class Interface:
                 f"Workers: {self.worker_model} x {self.current_workers}\n"
                 f"Strategy: {self._forced_strategy or 'AUTO'}\n"
                 f"Turns: {self.turn_count}\n"
-                f"History length: {len(self.history)} messages"
+                f"History length: {len(self.history)} messages\n"
+                f"Project: {self.store.project_dir}"
             )
+
+        elif action == "/project":
+            return f"Current project folder:\n{self.store.project_dir}"
+
+        elif action == "/projects":
+            projects = ProjectStore.list_projects(self.store.base_dir)
+            if not projects:
+                return "No saved projects found."
+            lines = ["Saved Projects:", "-" * 40]
+            for p in projects:
+                lines.append(f"  • {p['folder']}")
+                lines.append(f"    Name: {p['name']}")
+                lines.append(f"    Created: {p['created']}")
+                lines.append(f"    Path: {p['path']}")
+                lines.append("")
+            return "\n".join(lines)
+
+        elif action == "/save":
+            self._persist_turn(Turn(role="system", content="Manual save triggered."), "system", 0)
+            return f"State saved to:\n  {self.store.project_dir}"
+
+        elif action == "/artifact":
+            # /artifact filename content...
+            if len(parts) >= 3:
+                filename = parts[1]
+                content = " ".join(parts[2:])
+                path = self._save_artifact(filename, content)
+                return f"Artifact saved:\n  {path}"
+            return "Usage: /artifact <filename> <content>"
 
         else:
             return f"Unknown command: {action}. Type /help for available commands."
@@ -424,13 +612,17 @@ class Interface:
         return textwrap.dedent(f"""\
         Available commands:
           /quit, /q          Exit the interface
-          /clear             Clear conversation history
+          /clear             Clear in-memory history (disk files remain)
           /history           Show conversation transcript
           /status            Show current configuration
           /workers <n>       Resize worker pool (1-{self.max_workers})
-          /strategy <s>      Force strategy: {', '.join(self.STRATEGIES)} or auto
-          /model <name>      Change manager model (requires restart)
+          /strategy <s>      Force strategy or auto
+          /model <name>      Change manager model
           /worker_model <n>  Change worker model for all workers
+          /project           Show current project folder path
+          /projects          List all saved conversation projects
+          /save              Force save current state to disk
+          /artifact <f> <c>  Save a text artifact to the project folder
           /help, /h          Show this message
         """)
 
@@ -450,16 +642,12 @@ class Interface:
         ║  Manager: {self.manager_model:20}                         ║
         ║  Workers: {self.worker_model:20} x {self.current_workers:<3}                    ║
         ║  Mode:    {'AUTO (manager decides strategy)':20}                         ║
+        ║  Project: {str(self.store.project_dir):20}                         ║
         ╚══════════════════════════════════════════════════════════════╝
         Type /help for commands. Start chatting below.
         """))
 
-    # --------------------------------------------------------------------- #
-    # Interactive runner
-    # --------------------------------------------------------------------- #
-
     def run(self):
-        """Blocking REPL loop."""
         while True:
             try:
                 user_input = input("\n> ").strip()
@@ -488,8 +676,12 @@ if __name__ == "__main__":
     parser.add_argument("--max-workers", type=int, default=8, help="Max worker pool size")
     parser.add_argument("--ctx", type=int, default=32768, help="Context window")
     parser.add_argument("--manual", action="store_true", help="Disable auto-strategy")
+    parser.add_argument("--project", default=None, help="Project name for this session")
+    parser.add_argument("--projects-dir", default=None, help="Custom projects directory (default: Desktop/SwarmProjects)")
 
     args = parser.parse_args()
+
+    projects_dir = Path(args.projects_dir) if args.projects_dir else None
 
     iface = Interface(
         manager_model=args.manager,
@@ -498,5 +690,7 @@ if __name__ == "__main__":
         max_workers=args.max_workers,
         num_ctx=args.ctx,
         auto_mode=not args.manual,
+        project_name=args.project,
+        projects_dir=projects_dir,
     )
     iface.run()
